@@ -1,0 +1,35 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyCharm
+.idea/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Variables de entorno
+.env
+.env.*
+!.env.template
+
+# Datos de prueba
+data/videos/*
+data/test/*
+
+# Modelos YOLO
+models/*.pt
+models/*.onnx
+
+# Logs
+*.log
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
