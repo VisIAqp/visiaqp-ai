@@ -100,7 +100,7 @@ class PedestrianTracker:
         de detecciones con track_id persistente.
 
         IMPORTANTE: persist=True es necesario para que el tracker recuerde
-        el estado entre llamadas sucesivas de este método (frame a frame).
+        el estado entre llamadas sucesivas de este metodo (frame a frame).
         Si se llama con persist=False el tracking se resetea cada vez.
         """
         results = self.model.track(
