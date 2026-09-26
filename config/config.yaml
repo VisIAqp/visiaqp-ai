@@ -1,0 +1,75 @@
+# =====================================================================
+# visiaqp-ai - Configuración del pipeline de detección de peatones
+# =====================================================================
+
+# --- Modelo de detección (YOLO) ---
+model:
+  weights_path: "models/yolov8n.pt"   # ruta local; si no existe, se descarga
+  device: "cpu"                        # "cpu", "cuda:0", "mps"
+  confidence_threshold: 0.4            # confianza mínima para aceptar una detección
+  iou_threshold: 0.45                  # umbral de NMS
+  classes:                             # clases COCO a detectar (0 = person)
+    - 0
+
+# --- Tracking (evita doble conteo entre frames) ---
+tracker:
+  algorithm: "bytetrack"               # "bytetrack" | "deepsort"
+  track_thresh: 0.5
+  track_buffer: 30                     # frames que se mantiene un track sin verse
+  match_thresh: 0.8
+
+# --- Procesamiento de video ---
+processing:
+  frame_skip: 2                        # procesar 1 de cada N frames (rendimiento)
+  resize_width: 960                    # redimensionar frame antes de inferencia
+  max_fps: 10                          # límite de FPS de procesamiento
+
+# --- Cámaras / zonas asociadas ---
+# id_camara debe coincidir con el id_camara registrado en la base de datos (MySQL)
+cameras:
+  - id_camara: 1
+    nombre: "Plaza de Armas - Ingreso Norte"
+    id_zona: 1
+    source: "data/videos/plaza_armas_demo.mp4"   # ruta local, RTSP o índice de webcam (0)
+    zone_polygon:                                 # coordenadas normalizadas (0-1) del área de interés
+      - [0.05, 0.10]
+      - [0.95, 0.10]
+      - [0.95, 0.95]
+      - [0.05, 0.95]
+  - id_camara: 2
+    nombre: "Av. Ejercito - Cruce Principal"
+    id_zona: 2
+    source: 0
+    zone_polygon:
+      - [0.0, 0.0]
+      - [1.0, 0.0]
+      - [1.0, 1.0]
+      - [0.0, 1.0]
+
+# --- Análisis de concentración ---
+analysis:
+  window_seconds: 60                   # ventana de agregación para calcular densidad
+  thresholds:
+    bajo: 10                           # < 10 peatones en la ventana => "bajo"
+    medio: 30                          # 10-29 => "medio", >=30 => "alto"
+
+# --- Notificador (envío de resultados al backend FastAPI) ---
+notifier:
+  mode: "http"                         # dejamos solo http por ahora (sin websockets)
+  endpoint: "${API_BASE_URL}/api/procesamiento"
+  timeout_seconds: 5
+  retry_attempts: 3
+  retry_backoff_seconds: 2
+
+# --- Logging ---
+logging:
+  level: "INFO"                        # DEBUG | INFO | WARNING | ERROR
+  log_dir: "data/logs"
+  fallback_to_local_log: true          # si falla el notifier, guarda localmente
+
+# --- Visualización (debug local, no se usa en producción) ---
+visualizer:
+  enabled: false
+  show_boxes: true
+  show_heatmap: false
+  window_name: "VisIAqp - Debug"
