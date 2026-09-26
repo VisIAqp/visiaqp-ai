@@ -4,7 +4,7 @@
 
 # --- Modelo de detección (YOLO) ---
 model:
-  weights_path: "models/yolov8n.pt"   # ruta local; si no existe, se descarga
+  weights_path: "models/yolo26n.pt"   # ruta local; si no existe, se descarga
   device: "cpu"                        # "cpu", "cuda:0", "mps"
   confidence_threshold: 0.4            # confianza mínima para aceptar una detección
   iou_threshold: 0.45                  # umbral de NMS
