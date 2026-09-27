@@ -91,8 +91,13 @@ class PedestrianTracker:
         self.model = YOLO(weights_path)
         self.model.to(device)
 
-        # IDs únicos vistos desde que se creó este tracker (conteo acumulado real)
+        # IDs únicos vistos desde que se creó este tracker (conteo acumulado real,
+        # nunca se resetea salvo con reset() — útil para reportes históricos)
         self._seen_track_ids: Set[int] = set()
+
+        # IDs únicos vistos SOLO desde la última ventana cerrada por analyzer.py
+        # (se resetea con reset_window() cada vez que se cierra un indicador)
+        self._window_track_ids: Set[int] = set()
 
     def track(self, frame: np.ndarray) -> List[TrackedDetection]:
         """
@@ -131,6 +136,7 @@ class PedestrianTracker:
             track_id = int(box.id[0])
 
             self._seen_track_ids.add(track_id)
+            self._window_track_ids.add(track_id)
 
             tracked.append(
                 TrackedDetection(
@@ -149,14 +155,34 @@ class PedestrianTracker:
     def total_unique_count(self) -> int:
         """
         Cantidad TOTAL de personas únicas vistas desde que se creó este
-        tracker (acumulado). Útil para saber cuántas personas distintas
-        pasaron por la zona, no solo cuántas hay en un instante.
+        tracker (acumulado GLOBAL, nunca se resetea). Útil para saber
+        cuántas personas distintas pasaron por la zona en toda la sesión,
+        no solo cuántas hay en un instante o en una ventana puntual.
         """
         return len(self._seen_track_ids)
+
+    def window_unique_count(self) -> int:
+        """
+        Cantidad de personas únicas vistas SOLO desde que se cerró la
+        última ventana (analyzer.py). Esto es lo que debe usarse para
+        construir el indicador de concentración de cada ventana — a
+        diferencia de total_unique_count(), este número SÍ se resetea
+        y refleja la concentración real de ese periodo puntual.
+        """
+        return len(self._window_track_ids)
+
+    def reset_window(self) -> None:
+        """
+        Reinicia el conteo de la ventana actual. Debe llamarse justo
+        después de cerrar cada indicador (analyzer.close_window()),
+        para que el conteo de la siguiente ventana arranque en 0.
+        """
+        self._window_track_ids.clear()
 
     def reset(self) -> None:
         """Reinicia el conteo acumulado y el estado del tracker."""
         self._seen_track_ids.clear()
+        self._window_track_ids.clear()
         # Forzar reset del tracker interno de Ultralytics
         if hasattr(self.model.predictor, "trackers"):
             self.model.predictor.trackers = None
