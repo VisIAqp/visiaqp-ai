@@ -21,14 +21,20 @@ __pycache__/
 
 # Datos de prueba
 data/videos/*
+!data/videos/.gitkeep
 data/test/*
 
 # Modelos YOLO
 models/*.pt
 models/*.onnx
 
-# Logs
+# Logs (incluye los fallback_*.jsonl generados por main.py)
 *.log
+data/logs/*
+!data/logs/.gitkeep
+
+# Script de pruebas locales (desechable)
+probar.py
 
 # Archivos del sistema
 .DS_Store
