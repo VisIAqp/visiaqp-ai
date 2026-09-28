@@ -6,7 +6,7 @@ nada de HTTP ni de la API: solo produce los objetos de datos listos
 para que notifier.py los envíe.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List
 
@@ -104,6 +104,10 @@ class ZoneAnalyzer:
 
         self._samples.append(_WindowSample(timestamp=timestamp, count_in_zone=count, avg_confidence=avg_conf))
 
+    def has_pending_samples(self) -> bool:
+        """Indica si hay muestras acumuladas en la ventana actual sin cerrar."""
+        return len(self._samples) > 0
+
     def build_resultado(
         self,
         id_camara: int | None,
@@ -115,6 +119,9 @@ class ZoneAnalyzer:
         Construye un ResultadoDeteccion puntual (para la tabla
         resultado_deteccion), usando el conteo único acumulado del
         tracker (no las muestras de la ventana).
+
+        IMPORTANTE: llamar ANTES de close_window(), que limpia las muestras
+        usadas aquí para calcular la confianza promedio.
         """
         timestamp = timestamp or datetime.now()
         avg_conf = (
@@ -152,7 +159,7 @@ class ZoneAnalyzer:
         Cierra la ventana actual, calcula el indicador de concentración,
         y reinicia el estado para la siguiente ventana.
 
-        cantidad_peatones_unicos_totales: viene de tracker.total_unique_count(),
+        cantidad_peatones_unicos_totales: viene de tracker.window_unique_count(),
         representa personas ÚNICAS distintas vistas en la ventana (no promedio
         de conteos instantáneos, que sobrestimaría si la misma persona se
         queda varios frames).
