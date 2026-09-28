@@ -4,6 +4,11 @@ Calcula densidad/concentración de peatones por zona, agregando las
 detecciones trackeadas a lo largo de una ventana de tiempo. No conoce
 nada de HTTP ni de la API: solo produce los objetos de datos listos
 para que notifier.py los envíe.
+
+Todos los timestamps son de EVENTO (cuándo ocurrió lo que muestra el
+video) y los provee quien orquesta; el analyzer nunca consulta el reloj
+del sistema, para que los resultados no dependan de la velocidad de
+procesamiento.
 """
 
 from dataclasses import dataclass
@@ -15,12 +20,12 @@ from loguru import logger
 
 @dataclass
 class ResultadoDeteccion:
-    """Resultado de un procesamiento puntual (un frame o un batch corto)."""
+    """Resultado de un procesamiento puntual (una ventana de análisis)."""
     id_zona: int
     id_camara: int | None
     tipo_fuente: str  # "imagen" | "video"
-    fecha_analisis: str   # "YYYY-MM-DD"
-    hora_analisis: str    # "HH:MM:SS"
+    fecha_analisis: str   # "YYYY-MM-DD" (fecha del EVENTO)
+    hora_analisis: str    # "HH:MM:SS"   (hora del EVENTO)
     cantidad_peatones: int
     confianza_promedio: float
 
@@ -40,8 +45,8 @@ class ResultadoDeteccion:
 class Indicador:
     """Indicador agregado de concentración para una ventana de tiempo."""
     id_zona: int
-    periodo_inicio: str  # ISO datetime
-    periodo_fin: str      # ISO datetime
+    periodo_inicio: str  # ISO datetime (evento)
+    periodo_fin: str      # ISO datetime (evento)
     total_peatones: int
     promedio_peatones: float
     nivel_concentracion: str  # "bajo" | "medio" | "alto"
@@ -86,13 +91,12 @@ class ZoneAnalyzer:
         self._samples: List[_WindowSample] = []
         self._window_start: datetime | None = None
 
-    def add_sample(self, tracked_detections_in_zone: list, timestamp: datetime | None = None) -> None:
+    def add_sample(self, tracked_detections_in_zone: list, timestamp: datetime) -> None:
         """
         Registra una muestra: la cantidad de personas detectadas EN ZONA
-        en este instante, junto con su confianza promedio.
+        en el instante `timestamp` (hora del evento), junto con su
+        confianza promedio.
         """
-        timestamp = timestamp or datetime.now()
-
         if self._window_start is None:
             self._window_start = timestamp
 
@@ -113,17 +117,15 @@ class ZoneAnalyzer:
         id_camara: int | None,
         tipo_fuente: str,
         cantidad_peatones_unicos: int,
-        timestamp: datetime | None = None,
+        timestamp: datetime,
     ) -> ResultadoDeteccion:
         """
-        Construye un ResultadoDeteccion puntual (para la tabla
-        resultado_deteccion), usando el conteo único acumulado del
-        tracker (no las muestras de la ventana).
+        Construye un ResultadoDeteccion (para la tabla resultado_deteccion)
+        con la fecha/hora de EVENTO `timestamp` (normalmente el fin de la ventana).
 
         IMPORTANTE: llamar ANTES de close_window(), que limpia las muestras
         usadas aquí para calcular la confianza promedio.
         """
-        timestamp = timestamp or datetime.now()
         avg_conf = (
             sum(s.avg_confidence for s in self._samples) / len(self._samples)
             if self._samples else 0.0
@@ -139,11 +141,13 @@ class ZoneAnalyzer:
             confianza_promedio=avg_conf,
         )
 
-    def window_elapsed(self, now: datetime | None = None) -> bool:
-        """Indica si ya pasó window_seconds desde que empezó la ventana actual."""
+    def window_elapsed(self, now: datetime) -> bool:
+        """
+        Indica si ya pasaron window_seconds de tiempo de EVENTO desde que
+        empezó la ventana actual. `now` es el timestamp de evento actual.
+        """
         if self._window_start is None:
             return False
-        now = now or datetime.now()
         return (now - self._window_start) >= timedelta(seconds=self.window_seconds)
 
     def _classify(self, promedio_peatones: float) -> str:
