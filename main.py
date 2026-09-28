@@ -1,24 +1,24 @@
 """
 main.py
 Orquesta el pipeline completo de visiaqp-ai: lee config.yaml y .env,
-arma los componentes (detector+tracker, zonas, analyzer, notifier) por
-cada cámara configurada, y corre el loop principal de procesamiento.
+arma los componentes (tracker, zonas, analyzer, notifier) por cada
+cámara configurada, y corre el loop principal de procesamiento.
 
-Pendientes conocidos (ver historial de decisiones del proyecto):
-  - TODO: separar fecha_evento (cuándo ocurrió) de fecha_registro (cuándo
-    se procesó) para videos pregrabados subidos después de un fallo.
-  - TODO: las ventanas de análisis (window_seconds) se miden con tiempo
-    de reloj (datetime.now()), no con el timestamp real del video. Para
-    video pregrabado esto no corresponde 1:1 a segundos reales de
-    contenido si el procesamiento es más rápido o más lento que tiempo real.
-  - Ya resuelto en este archivo: la ventana final se cierra y notifica
-    aunque no llegue a completar window_seconds (video se acaba antes).
+Tiempo de evento vs. tiempo de registro:
+  - Los timestamps que se envían a la API son de EVENTO (cuándo ocurrió
+    lo que muestra el video): hora de inicio + segundos transcurridos
+    en la fuente. No dependen de qué tan rápido procese la CPU.
+  - El momento en que la API guarda el dato (fecha_registro) lo pone la
+    base de datos con su DEFAULT CURRENT_TIMESTAMP.
+
+Pendiente conocido:
+  - TODO: cargar las cámaras desde la base de datos en vez de config.yaml.
 """
 
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -37,6 +37,31 @@ def load_config(config_path: str = "config/config.yaml") -> dict:
     """Carga y parsea config.yaml."""
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> datetime:
+    """
+    Determina la hora de inicio del EVENTO para esta cámara:
+      - fuente en vivo: ahora mismo.
+      - archivo con `event_start` en el config: esa fecha/hora.
+      - archivo sin `event_start`: se asume ahora (con advertencia), porque
+        no hay forma confiable de saber cuándo se grabó.
+    """
+    if is_live:
+        return datetime.now()
+
+    raw = camera_config.get("event_start")
+    if raw is None:
+        logger.warning(
+            f"{nombre}: archivo de video sin 'event_start' en config.yaml; "
+            f"se asume que el evento ocurre ahora. Defínelo para registrar la fecha real."
+        )
+        return datetime.now()
+
+    # PyYAML convierte fechas sin comillas a datetime automáticamente
+    if isinstance(raw, datetime):
+        return raw
+    return datetime.fromisoformat(str(raw))
 
 
 def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> None:
@@ -93,12 +118,21 @@ def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> Non
             resize_width=processing_cfg["resize_width"],
             target_fps=processing_cfg["target_fps"],
         ) as video:
-            for frame in video.frames():
+            event_start = _resolve_event_start(camera_config, video.is_live, nombre)
+            tipo_fuente = "video"
+            last_event_time = event_start
+
+            logger.info(f"{nombre}: inicio del evento = {event_start.isoformat()}")
+
+            for frame, elapsed_seconds in video.frames():
+                event_time = event_start + timedelta(seconds=elapsed_seconds)
+                last_event_time = event_time
+
                 tracked = tracker.track(frame)
                 h, w = frame.shape[:2]
                 en_zona = zone_manager.filter_detections_in_zone(tracked, w, h)
 
-                analyzer.add_sample(en_zona)
+                analyzer.add_sample(en_zona, event_time)
 
                 if visualizer:
                     display = visualizer.draw_zone(frame, zone_manager.zones[0], w, h)
@@ -110,15 +144,19 @@ def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> Non
                         logger.info("Visualizador cerrado por el usuario (tecla 'q')")
                         break
 
-                if analyzer.window_elapsed():
-                    _close_and_notify(analyzer, tracker, id_camara, notifier, log_cfg)
+                if analyzer.window_elapsed(event_time):
+                    _close_and_notify(
+                        analyzer, tracker, id_camara, tipo_fuente, event_time, notifier, log_cfg
+                    )
 
             # Al terminar el video (o cortarse el stream), cerrar la
             # ventana parcial en curso si tiene muestras pendientes,
             # en vez de descartarla silenciosamente.
             if analyzer.has_pending_samples():
                 logger.info(f"Cerrando ventana final parcial para {nombre}")
-                _close_and_notify(analyzer, tracker, id_camara, notifier, log_cfg)
+                _close_and_notify(
+                    analyzer, tracker, id_camara, tipo_fuente, last_event_time, notifier, log_cfg
+                )
 
     except RuntimeError as e:
         logger.error(f"No se pudo procesar la cámara {nombre}: {e}")
@@ -132,6 +170,8 @@ def _close_and_notify(
     analyzer: ZoneAnalyzer,
     tracker: PedestrianTracker,
     id_camara: int,
+    tipo_fuente: str,
+    event_time: datetime,
     notifier: Notifier,
     log_cfg: dict,
 ) -> None:
@@ -148,8 +188,9 @@ def _close_and_notify(
 
     resultado = analyzer.build_resultado(
         id_camara=id_camara,
-        tipo_fuente="video",
+        tipo_fuente=tipo_fuente,
         cantidad_peatones_unicos=unique_in_window,
+        timestamp=event_time,
     )
     indicador = analyzer.close_window(unique_in_window)
     tracker.reset_window()
