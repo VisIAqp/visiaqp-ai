@@ -25,15 +25,15 @@ processing:
 
 # --- Cámaras / zonas asociadas ---
 # id_camara debe coincidir con el id_camara registrado en la base de datos (MySQL)
-# event_start: solo aplica a ARCHIVOS de video. Es la fecha/hora en que se grabó el
-# video (ISO 8601). En cámaras en vivo se ignora (se usa la hora actual).
+# event_start: SOLO PRUEBAS LOCALES. En producción la fecha del video la aporta
+# el backend (formulario de carga), no este archivo.
 cameras:
   - id_camara: 1
     nombre: "Zona de Prueba"
     id_zona: 1
-    source: "data/videos/video-people-walking-1.mp4"   # ruta local, RTSP o índice de webcam (0)
+    source: "data/videos/video-people-walking-1.mp4"
     event_start: "2026-09-20T14:30:00"
-    zone_polygon:                                      # coordenadas normalizadas (0-1) del área de interés
+    zone_polygon:
       - [0.05, 0.10]
       - [0.95, 0.10]
       - [0.95, 0.95]
@@ -51,27 +51,28 @@ cameras:
   #     - [0.0, 1.0]
 
 # --- Análisis de concentración ---
+# Los umbrales bajo/medio/alto ya NO se definen aquí: el motor solo manda
+# ventanas crudas (cantidad_peatones, confianza_promedio); la clasificación
+# la hace el backend con umbral_concentracion (por zona, en la BD).
 analysis:
   window_seconds: 10                   # ventana de agregación (usar 60 en producción)
-  thresholds:
-    bajo: 10                           # < 10 peatones en la ventana => "bajo"
-    medio: 30                          # 10-29 => "medio", >=30 => "alto"
 
 # --- Notificador (envío de resultados al backend FastAPI) ---
 # La URL base viene de .env (API_BASE_URL); aquí solo van las rutas.
 notifier:
   endpoints:
-    resultado: "/api/procesamiento"
-    indicador: "/api/indicadores"
+    crear_procesamiento: "/api/procesamientos"
+    cerrar_procesamiento: "/api/procesamientos/{id}"        # PATCH, {id} se reemplaza en código
+    resultado: "/api/procesamientos/{id}/resultados"        # POST, {id} se reemplaza en código
   timeout_seconds: 5
   retry_attempts: 3
   retry_backoff_seconds: 2
 
 # --- Logging ---
 logging:
-  level: "INFO"                        # DEBUG | INFO | WARNING | ERROR
+  level: "INFO"
   log_dir: "data/logs"
-  fallback_to_local_log: true          # si falla el notifier, guarda localmente
+  fallback_to_local_log: true
 
 # --- Visualización (debug local, no se usa en producción) ---
 visualizer:
