@@ -15,19 +15,21 @@ from loguru import logger
 class Notifier:
     """
     Envía resultados e indicadores al backend, con reintentos ante
-    fallos de red. Si todos los reintentos fallan, delega el guardado
-    local a quien lo llame (main.py decide si loguea a data/logs/).
+    fallos de red. Si todos los reintentos fallan, devuelve False y
+    quien lo llame (main.py) decide si guarda el dato localmente.
     """
 
     def __init__(
         self,
         api_base_url: str,
+        endpoints: dict,
         api_token: Optional[str] = None,
         timeout_seconds: int = 5,
         retry_attempts: int = 3,
         retry_backoff_seconds: int = 2,
     ):
         self.api_base_url = api_base_url.rstrip("/")
+        self.endpoints = endpoints  # {"resultado": "/api/...", "indicador": "/api/..."}
         self.timeout_seconds = timeout_seconds
         self.retry_attempts = retry_attempts
         self.retry_backoff_seconds = retry_backoff_seconds
@@ -61,9 +63,9 @@ class Notifier:
         return False
 
     def send_resultado(self, resultado) -> bool:
-        """Envía un ResultadoDeteccion al endpoint /api/procesamiento."""
-        return self._post_with_retry("/api/procesamiento", resultado.to_dict())
+        """Envía un ResultadoDeteccion al endpoint configurado en endpoints['resultado']."""
+        return self._post_with_retry(self.endpoints["resultado"], resultado.to_dict())
 
     def send_indicador(self, indicador) -> bool:
-        """Envía un Indicador al endpoint /api/indicadores."""
-        return self._post_with_retry("/api/indicadores", indicador.to_dict())
+        """Envía un Indicador al endpoint configurado en endpoints['indicador']."""
+        return self._post_with_retry(self.endpoints["indicador"], indicador.to_dict())

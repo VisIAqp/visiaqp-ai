@@ -20,43 +20,49 @@ tracker:
 
 # --- Procesamiento de video ---
 processing:
-  frame_skip: 2                        # procesar 1 de cada N frames (rendimiento)
+  target_fps: 5                        # frames analizados por segundo de CONTENIDO (no de reloj)
   resize_width: 960                    # redimensionar frame antes de inferencia
-  max_fps: 10                          # límite de FPS de procesamiento
 
 # --- Cámaras / zonas asociadas ---
 # id_camara debe coincidir con el id_camara registrado en la base de datos (MySQL)
+# event_start: solo aplica a ARCHIVOS de video. Es la fecha/hora en que se grabó el
+# video (ISO 8601). En cámaras en vivo se ignora (se usa la hora actual).
 cameras:
   - id_camara: 1
-    nombre: "Plaza de Armas - Ingreso Norte"
+    nombre: "Zona de Prueba"
     id_zona: 1
-    source: "data/videos/plaza_armas_demo.mp4"   # ruta local, RTSP o índice de webcam (0)
-    zone_polygon:                                 # coordenadas normalizadas (0-1) del área de interés
+    source: "data/videos/video-people-walking-1.mp4"   # ruta local, RTSP o índice de webcam (0)
+    event_start: "2026-09-20T14:30:00"
+    zone_polygon:                                      # coordenadas normalizadas (0-1) del área de interés
       - [0.05, 0.10]
       - [0.95, 0.10]
       - [0.95, 0.95]
       - [0.05, 0.95]
-  - id_camara: 2
-    nombre: "Av. Ejercito - Cruce Principal"
-    id_zona: 2
-    source: 0
-    zone_polygon:
-      - [0.0, 0.0]
-      - [1.0, 0.0]
-      - [1.0, 1.0]
-      - [0.0, 1.0]
+
+  # Cámara 2 comentada temporalmente: requiere webcam física o stream real.
+  # - id_camara: 2
+  #   nombre: "Av. Ejercito - Cruce Principal"
+  #   id_zona: 2
+  #   source: 0
+  #   zone_polygon:
+  #     - [0.0, 0.0]
+  #     - [1.0, 0.0]
+  #     - [1.0, 1.0]
+  #     - [0.0, 1.0]
 
 # --- Análisis de concentración ---
 analysis:
-  window_seconds: 60                   # ventana de agregación para calcular densidad
+  window_seconds: 10                   # ventana de agregación (usar 60 en producción)
   thresholds:
     bajo: 10                           # < 10 peatones en la ventana => "bajo"
     medio: 30                          # 10-29 => "medio", >=30 => "alto"
 
 # --- Notificador (envío de resultados al backend FastAPI) ---
+# La URL base viene de .env (API_BASE_URL); aquí solo van las rutas.
 notifier:
-  mode: "http"                         # dejamos solo http por ahora (sin websockets)
-  endpoint: "${API_BASE_URL}/api/procesamiento"
+  endpoints:
+    resultado: "/api/procesamiento"
+    indicador: "/api/indicadores"
   timeout_seconds: 5
   retry_attempts: 3
   retry_backoff_seconds: 2
@@ -71,5 +77,4 @@ logging:
 visualizer:
   enabled: false
   show_boxes: true
-  show_heatmap: false
   window_name: "VisIAqp - Debug"
