@@ -1,26 +1,9 @@
 """
 main.py
-Orquesta el pipeline completo de visiaqp-ai: lee config.yaml y .env,
-arma los componentes (tracker, zonas, analyzer, notifier) por cada
-cámara configurada, y corre el loop principal de procesamiento.
-
-Ciclo de vida de un procesamiento (coincide con la tabla `procesamiento`
-del backend):
-  1. Al abrir la cámara: POST para crear el procesamiento (estado
-     'procesando'), con la fecha de EVENTO de inicio. El backend
-     devuelve id_procesamiento. Si falla, se registra en el fallback
-     local y se sigue procesando solo con fallback (sin id_procesamiento).
-  2. Por cada ventana cerrada: POST de un ResultadoDeteccion crudo,
-     asociado a ese id_procesamiento (si existe).
-  3. Al terminar (o fallar): PATCH para cerrar el procesamiento
-     ('completado' o 'error'), solo si llegó a crearse.
-
-El motor ya NO calcula indicadores (bajo/medio/alto): solo manda
-resultados crudos por ventana. Esa clasificación la hace el backend
-con umbral_concentracion (por zona).
-
-Pendiente conocido:
-  - TODO: cargar las cámaras desde la base de datos en vez de config.yaml.
+Orquesta el pipeline de visiaqp-ai: obtiene cámaras del backend (o del
+fallback local), procesa cada una (detección, tracking, zonas, ventanas)
+y envía los resultados. Ver README.md para el ciclo de vida completo del
+procesamiento y la configuración por entorno (VISIAQP_ENV).
 """
 
 import json
@@ -41,17 +24,62 @@ from src.notifier import Notifier
 from src.visualizer import Visualizer
 
 
-def load_config(config_path: str = "config/config.yaml") -> dict:
-    """Carga y parsea config.yaml."""
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Fusiona overrides sobre base, recursivamente para diccionarios anidados."""
+    result = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(env: str = "dev", config_dir: str = "config") -> dict:
+    """
+    Carga config.base.yaml y le aplica los overrides de config.{env}.yaml.
+    env: "dev" (por defecto) o "prod".
+    """
+    base_path = Path(config_dir) / "config.base.yaml"
+    env_path = Path(config_dir) / f"config.{env}.yaml"
+
+    with open(base_path, "r", encoding="utf-8") as f:
+        base = yaml.safe_load(f) or {}
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        overrides = yaml.safe_load(f) or {}
+
+    return _deep_merge(base, overrides)
+
+
+def load_cameras(config: dict, notifier: Notifier) -> list[dict]:
+    """
+    Obtiene la lista de cámaras a procesar: primero intenta el backend
+    (GET /api/camaras); si falla y fallback_to_local_cameras está
+    activo, usa cameras_fallback de config.{env}.yaml.
+    """
+    cameras = notifier.get_cameras()
+    if cameras is not None:
+        logger.info(f"{len(cameras)} cámara(s) obtenidas del backend")
+        return cameras
+
+    if config.get("fallback_to_local_cameras", False):
+        local = config.get("cameras_fallback", [])
+        logger.warning(
+            f"No se pudo obtener la lista de cámaras del backend; "
+            f"usando cameras_fallback de config ({len(local)} cámara(s))"
+        )
+        return local
+
+    logger.error("No se pudo obtener la lista de cámaras del backend y no hay fallback local configurado")
+    return []
 
 
 def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> datetime:
     """
     Determina la hora de inicio del EVENTO para esta cámara:
       - fuente en vivo: ahora mismo.
-      - archivo con `event_start` en el config: esa fecha/hora.
+      - archivo con `event_start` en su configuración: esa fecha/hora.
       - archivo sin `event_start`: se asume ahora (con advertencia).
     """
     if is_live:
@@ -60,7 +88,7 @@ def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> dat
     raw = camera_config.get("event_start")
     if raw is None:
         logger.warning(
-            f"{nombre}: archivo de video sin 'event_start' en config.yaml; "
+            f"{nombre}: archivo de video sin 'event_start'; "
             f"se asume que el evento ocurre ahora. Defínelo para registrar la fecha real."
         )
         return datetime.now()
@@ -81,6 +109,11 @@ def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> Non
     id_zona = camera_config["id_zona"]
     source = camera_config["source"]
     nombre = camera_config.get("nombre", f"Camara {id_camara}")
+    zone_polygon = camera_config.get("zone_polygon")
+
+    if not zone_polygon:
+        logger.error(f"{nombre}: no tiene zone_polygon definido, se omite")
+        return
 
     logger.info(f"Iniciando procesamiento de cámara: {nombre} (id={id_camara}, zona={id_zona})")
 
@@ -236,11 +269,15 @@ def _log_fallback(kind: str, payload: dict, log_cfg: dict) -> None:
 
 def main() -> None:
     load_dotenv()
-    config = load_config()
+
+    env = os.environ.get("VISIAQP_ENV", "dev")
+    config = load_config(env)
 
     logging_cfg = config.get("logging", {})
     logger.remove()
     logger.add(sys.stderr, level=logging_cfg.get("level", "INFO"))
+
+    logger.info(f"Entorno activo: {env}")
 
     notifier_cfg = config["notifier"]
     notifier = Notifier(
@@ -252,9 +289,9 @@ def main() -> None:
         retry_backoff_seconds=notifier_cfg["retry_backoff_seconds"],
     )
 
-    cameras = config.get("cameras", [])
+    cameras = load_cameras(config, notifier)
     if not cameras:
-        logger.warning("No hay cámaras configuradas en config.yaml")
+        logger.warning("No hay cámaras para procesar")
         return
 
     for camera_config in cameras:

@@ -1,8 +1,8 @@
 """
 notifier.py
-Gestiona el ciclo de vida de un `procesamiento` en el backend y envía
-los resultados por ventana. No conoce nada de detección, tracking ni
-zonas: solo recibe datos ya armados y los manda por HTTP.
+Gestiona la comunicación con el backend: obtiene la lista de cámaras,
+gestiona el ciclo de vida de un `procesamiento`, y envía los resultados
+por ventana. No conoce nada de detección, tracking ni zonas.
 """
 
 import time
@@ -14,8 +14,8 @@ from loguru import logger
 
 class Notifier:
     """
-    Crea y cierra procesamientos, y envía resultados por ventana al
-    backend, con reintentos ante fallos de red.
+    Consulta cámaras, crea y cierra procesamientos, y envía resultados
+    por ventana al backend, con reintentos ante fallos de red.
     """
 
     def __init__(
@@ -37,7 +37,7 @@ class Notifier:
         if api_token:
             self.headers["Authorization"] = f"Bearer {api_token}"
 
-    def _request_with_retry(self, method: str, endpoint: str, payload: dict | None = None) -> dict | None:
+    def _request_with_retry(self, method: str, endpoint: str, payload: dict | None = None) -> dict | list | None:
         """
         Intenta la request dada, reintentando con backoff si falla.
         Devuelve el JSON de la respuesta si tuvo éxito, o None si agotó
@@ -61,6 +61,30 @@ class Notifier:
 
         logger.error(f"No se pudo completar {method} {url} tras {self.retry_attempts} intentos")
         return None
+
+    def get_cameras(self) -> list[dict] | None:
+        """
+        Obtiene la lista de cámaras activas desde el backend.
+        Devuelve una lista de diccionarios con la forma que espera
+        process_camera() en main.py (id_camara, id_zona, nombre, source,
+        zone_polygon, event_start), o None si la consulta falló.
+        """
+        data = self._request_with_retry("GET", self.endpoints["listar_camaras"])
+        if data is None:
+            return None
+
+        cameras = []
+        for cam in data:
+            cameras.append({
+                "id_camara": cam["id_camara"],
+                "id_zona": cam["id_zona"],
+                "nombre": cam.get("nombre", f"Camara {cam['id_camara']}"),
+                "source": cam["url_stream"],
+                "zone_polygon": cam.get("zone_polygon"),
+                # event_start no aplica a cámaras en vivo; solo tendría sentido
+                # si el backend algún día expone videos pregrabados por esta vía.
+            })
+        return cameras
 
     def create_procesamiento(self, payload: dict) -> int | None:
         """
