@@ -1,0 +1,28 @@
+# visiaqp-ai - Overrides de DESARROLLO
+
+model:
+  device: "cpu"
+
+processing:
+  target_fps: 5
+
+logging:
+  level: "DEBUG"
+
+visualizer:
+  enabled: true
+  show_boxes: true
+  window_name: "VisIAqp - Debug"
+
+fallback_to_local_cameras: true
+cameras_fallback:
+  - id_camara: 1
+    nombre: "Zona de Prueba (local)"
+    id_zona: 1
+    source: "data/videos/video-people-walking-1.mp4"
+    event_start: "2026-09-20T14:30:00"
+    zone_polygon:
+      - [0.05, 0.10]
+      - [0.95, 0.10]
+      - [0.95, 0.95]
+      - [0.05, 0.95]
