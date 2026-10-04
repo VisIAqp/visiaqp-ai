@@ -1,8 +1,4 @@
-# =====================================================================
 # visiaqp-ai - Configuración base
-# Los archivos config.dev.yaml / config.prod.yaml sobreescriben solo
-# las claves que necesitan cambiar por entorno.
-# =====================================================================
 
 model:
   weights_path: "models/yolo26n.pt"
