@@ -22,10 +22,10 @@ class Notifier:
         self,
         api_base_url: str,
         endpoints: dict,
-        api_token: Optional[str] = None,
         timeout_seconds: int = 5,
         retry_attempts: int = 3,
         retry_backoff_seconds: int = 2,
+        api_key: Optional[str] = None,
     ):
         self.api_base_url = api_base_url.rstrip("/")
         self.endpoints = endpoints
@@ -34,8 +34,8 @@ class Notifier:
         self.retry_backoff_seconds = retry_backoff_seconds
 
         self.headers = {"Content-Type": "application/json"}
-        if api_token:
-            self.headers["Authorization"] = f"Bearer {api_token}"
+        if api_key:
+            self.headers["X-Api-Key"] = api_key
 
     def _request_with_retry(self, method: str, endpoint: str, payload: dict | None = None) -> dict | list | None:
         """

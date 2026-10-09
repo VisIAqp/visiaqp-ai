@@ -283,10 +283,10 @@ def main() -> None:
     notifier = Notifier(
         api_base_url=os.environ.get("API_BASE_URL", "http://localhost:8000"),
         endpoints=notifier_cfg["endpoints"],
-        api_token=os.environ.get("API_TOKEN") or None,
         timeout_seconds=notifier_cfg["timeout_seconds"],
         retry_attempts=notifier_cfg["retry_attempts"],
         retry_backoff_seconds=notifier_cfg["retry_backoff_seconds"],
+        api_key=os.environ.get("MOTOR_API_KEY") or None,
     )
 
     cameras = load_cameras(config, notifier)
