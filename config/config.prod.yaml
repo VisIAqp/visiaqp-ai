@@ -6,6 +6,9 @@ model:
 processing:
   target_fps: 5
 
+videos:
+  library_dir: "/mnt/videos"
+
 logging:
   level: "WARNING"
 

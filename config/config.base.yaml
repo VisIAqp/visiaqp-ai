@@ -19,12 +19,22 @@ processing:
 analysis:
   window_seconds: 60
 
+videos:
+  library_dir: "data/videos"
+  extensions: [".mp4", ".avi", ".mkv", ".mov"]
+  recursive: false
+  catalog_sync_seconds: 60
+  pending_poll_seconds: 10
+
 notifier:
   endpoints:
     listar_camaras: "/api/camaras"
     crear_procesamiento: "/api/procesamientos"
     cerrar_procesamiento: "/api/procesamientos/{id}"
     resultado: "/api/procesamientos/{id}/resultados"
+    sincronizar_videos: "/api/videos/sincronizar"
+    listar_pendientes: "/api/procesamientos/pendientes"
+    iniciar_procesamiento: "/api/procesamientos/{id}/iniciar"
   timeout_seconds: 5
   retry_attempts: 3
   retry_backoff_seconds: 2
