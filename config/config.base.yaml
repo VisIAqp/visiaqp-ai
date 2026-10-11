@@ -1,0 +1,34 @@
+# visiaqp-ai - Configuración base
+
+model:
+  weights_path: "models/yolo26n.pt"
+  confidence_threshold: 0.4
+  iou_threshold: 0.45
+  classes:
+    - 0
+
+tracker:
+  algorithm: "bytetrack"
+  track_thresh: 0.5
+  track_buffer: 30
+  match_thresh: 0.8
+
+processing:
+  resize_width: 960
+
+analysis:
+  window_seconds: 60
+
+notifier:
+  endpoints:
+    listar_camaras: "/api/camaras"
+    crear_procesamiento: "/api/procesamientos"
+    cerrar_procesamiento: "/api/procesamientos/{id}"
+    resultado: "/api/procesamientos/{id}/resultados"
+  timeout_seconds: 5
+  retry_attempts: 3
+  retry_backoff_seconds: 2
+
+logging:
+  log_dir: "data/logs"
+  fallback_to_local_log: true

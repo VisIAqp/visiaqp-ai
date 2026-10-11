@@ -1,18 +1,9 @@
 """
 main.py
-Orquesta el pipeline completo de visiaqp-ai: lee config.yaml y .env,
-arma los componentes (tracker, zonas, analyzer, notifier) por cada
-cámara configurada, y corre el loop principal de procesamiento.
-
-Tiempo de evento vs. tiempo de registro:
-  - Los timestamps que se envían a la API son de EVENTO (cuándo ocurrió
-    lo que muestra el video): hora de inicio + segundos transcurridos
-    en la fuente. No dependen de qué tan rápido procese la CPU.
-  - El momento en que la API guarda el dato (fecha_registro) lo pone la
-    base de datos con su DEFAULT CURRENT_TIMESTAMP.
-
-Pendiente conocido:
-  - TODO: cargar las cámaras desde la base de datos en vez de config.yaml.
+Orquesta el pipeline de visiaqp-ai: obtiene cámaras del backend (o del
+fallback local), procesa cada una (detección, tracking, zonas, ventanas)
+y envía los resultados. Ver README.md para el ciclo de vida completo del
+procesamiento y la configuración por entorno (VISIAQP_ENV).
 """
 
 import json
@@ -33,19 +24,63 @@ from src.notifier import Notifier
 from src.visualizer import Visualizer
 
 
-def load_config(config_path: str = "config/config.yaml") -> dict:
-    """Carga y parsea config.yaml."""
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Fusiona overrides sobre base, recursivamente para diccionarios anidados."""
+    result = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(env: str = "dev", config_dir: str = "config") -> dict:
+    """
+    Carga config.base.yaml y le aplica los overrides de config.{env}.yaml.
+    env: "dev" (por defecto) o "prod".
+    """
+    base_path = Path(config_dir) / "config.base.yaml"
+    env_path = Path(config_dir) / f"config.{env}.yaml"
+
+    with open(base_path, "r", encoding="utf-8") as f:
+        base = yaml.safe_load(f) or {}
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        overrides = yaml.safe_load(f) or {}
+
+    return _deep_merge(base, overrides)
+
+
+def load_cameras(config: dict, notifier: Notifier) -> list[dict]:
+    """
+    Obtiene la lista de cámaras a procesar: primero intenta el backend
+    (GET /api/camaras); si falla y fallback_to_local_cameras está
+    activo, usa cameras_fallback de config.{env}.yaml.
+    """
+    cameras = notifier.get_cameras()
+    if cameras is not None:
+        logger.info(f"{len(cameras)} cámara(s) obtenidas del backend")
+        return cameras
+
+    if config.get("fallback_to_local_cameras", False):
+        local = config.get("cameras_fallback", [])
+        logger.warning(
+            f"No se pudo obtener la lista de cámaras del backend; "
+            f"usando cameras_fallback de config ({len(local)} cámara(s))"
+        )
+        return local
+
+    logger.error("No se pudo obtener la lista de cámaras del backend y no hay fallback local configurado")
+    return []
 
 
 def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> datetime:
     """
     Determina la hora de inicio del EVENTO para esta cámara:
       - fuente en vivo: ahora mismo.
-      - archivo con `event_start` en el config: esa fecha/hora.
-      - archivo sin `event_start`: se asume ahora (con advertencia), porque
-        no hay forma confiable de saber cuándo se grabó.
+      - archivo con `event_start` en su configuración: esa fecha/hora.
+      - archivo sin `event_start`: se asume ahora (con advertencia).
     """
     if is_live:
         return datetime.now()
@@ -53,12 +88,11 @@ def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> dat
     raw = camera_config.get("event_start")
     if raw is None:
         logger.warning(
-            f"{nombre}: archivo de video sin 'event_start' en config.yaml; "
+            f"{nombre}: archivo de video sin 'event_start'; "
             f"se asume que el evento ocurre ahora. Defínelo para registrar la fecha real."
         )
         return datetime.now()
 
-    # PyYAML convierte fechas sin comillas a datetime automáticamente
     if isinstance(raw, datetime):
         return raw
     return datetime.fromisoformat(str(raw))
@@ -66,14 +100,20 @@ def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> dat
 
 def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> None:
     """
-    Procesa UNA cámara de principio a fin: abre su fuente de video,
-    corre detección+tracking, filtra por zona, agrega por ventana,
-    y notifica cada ventana cerrada al backend.
+    Procesa UNA cámara de principio a fin: crea el procesamiento en el
+    backend, abre la fuente de video, corre detección+tracking, filtra
+    por zona, agrega por ventana, envía cada resultado, y cierra el
+    procesamiento al terminar (éxito o error).
     """
     id_camara = camera_config["id_camara"]
     id_zona = camera_config["id_zona"]
     source = camera_config["source"]
     nombre = camera_config.get("nombre", f"Camara {id_camara}")
+    zone_polygon = camera_config.get("zone_polygon")
+
+    if not zone_polygon:
+        logger.error(f"{nombre}: no tiene zone_polygon definido, se omite")
+        return
 
     logger.info(f"Iniciando procesamiento de cámara: {nombre} (id={id_camara}, zona={id_zona})")
 
@@ -97,20 +137,18 @@ def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> Non
     )
 
     zone_manager = ZoneManager.from_config(camera_config)
+    analyzer = ZoneAnalyzer(id_zona=id_zona, window_seconds=analysis_cfg["window_seconds"])
 
-    analyzer = ZoneAnalyzer(
-        id_zona=id_zona,
-        window_seconds=analysis_cfg["window_seconds"],
-        thresholds=analysis_cfg["thresholds"],
-    )
-
-    # El visualizer solo se crea si está habilitado (debug local, nunca en producción)
     visualizer = None
     if vis_cfg.get("enabled", False):
         visualizer = Visualizer(
             window_name=vis_cfg.get("window_name", "VisIAqp - Debug"),
             show_boxes=vis_cfg.get("show_boxes", True),
         )
+
+    id_procesamiento = None
+    estado_final = "completado"
+    mensaje_error = None
 
     try:
         with VideoSource(
@@ -119,10 +157,25 @@ def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> Non
             target_fps=processing_cfg["target_fps"],
         ) as video:
             event_start = _resolve_event_start(camera_config, video.is_live, nombre)
-            tipo_fuente = "video"
+            tipo_fuente = "stream" if video.is_live else "video"
             last_event_time = event_start
 
-            logger.info(f"{nombre}: inicio del evento = {event_start.isoformat()}")
+            logger.info(f"{nombre}: inicio del evento = {event_start.isoformat()} (tipo_fuente={tipo_fuente})")
+
+            procesamiento_payload = {
+                "id_zona": id_zona,
+                "id_camara": id_camara,
+                "tipo_fuente": tipo_fuente,
+                "ruta_archivo": str(source) if not video.is_live else None,
+                "fecha_captura_inicio": event_start.isoformat(),
+            }
+            id_procesamiento = notifier.create_procesamiento(procesamiento_payload)
+            if id_procesamiento is None:
+                logger.error(
+                    f"{nombre}: no se pudo crear el procesamiento en el backend; "
+                    f"se continúa solo con fallback local"
+                )
+                _log_fallback("creacion_procesamiento", procesamiento_payload, log_cfg)
 
             for frame, elapsed_seconds in video.frames():
                 event_time = event_start + timedelta(seconds=elapsed_seconds)
@@ -145,69 +198,60 @@ def process_camera(camera_config: dict, config: dict, notifier: Notifier) -> Non
                         break
 
                 if analyzer.window_elapsed(event_time):
-                    _close_and_notify(
-                        analyzer, tracker, id_camara, tipo_fuente, event_time, notifier, log_cfg
-                    )
+                    _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
 
-            # Al terminar el video (o cortarse el stream), cerrar la
-            # ventana parcial en curso si tiene muestras pendientes,
-            # en vez de descartarla silenciosamente.
             if analyzer.has_pending_samples():
                 logger.info(f"Cerrando ventana final parcial para {nombre}")
-                _close_and_notify(
-                    analyzer, tracker, id_camara, tipo_fuente, last_event_time, notifier, log_cfg
-                )
+                _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
 
     except RuntimeError as e:
         logger.error(f"No se pudo procesar la cámara {nombre}: {e}")
+        estado_final = "error"
+        mensaje_error = str(e)
 
     finally:
         if visualizer:
             visualizer.close()
 
+        if id_procesamiento is not None:
+            cerrado = notifier.close_procesamiento(id_procesamiento, {
+                "estado": estado_final,
+                "fecha_fin_proceso": datetime.now().isoformat(),
+                "mensaje_error": mensaje_error,
+            })
+            if not cerrado:
+                _log_fallback("cierre_procesamiento", {
+                    "id_procesamiento": id_procesamiento,
+                    "estado": estado_final,
+                    "mensaje_error": mensaje_error,
+                }, log_cfg)
 
-def _close_and_notify(
+
+def _close_window_and_send(
     analyzer: ZoneAnalyzer,
     tracker: PedestrianTracker,
     id_camara: int,
-    tipo_fuente: str,
-    event_time: datetime,
+    id_procesamiento: int | None,
     notifier: Notifier,
     log_cfg: dict,
 ) -> None:
-    """
-    Cierra la ventana actual y notifica al backend dos cosas:
-      - el resultado puntual (tabla resultado_deteccion)
-      - el indicador de concentración (tabla indicador)
-
-    IMPORTANTE: build_resultado() debe llamarse ANTES de close_window(),
-    porque close_window() limpia las muestras que build_resultado() usa
-    para calcular la confianza promedio.
-    """
+    """Cierra la ventana actual y envía el ResultadoDeteccion crudo resultante."""
     unique_in_window = tracker.window_unique_count()
-
-    resultado = analyzer.build_resultado(
-        id_camara=id_camara,
-        tipo_fuente=tipo_fuente,
-        cantidad_peatones_unicos=unique_in_window,
-        timestamp=event_time,
-    )
-    indicador = analyzer.close_window(unique_in_window)
+    resultado = analyzer.close_window(id_camara, unique_in_window)
     tracker.reset_window()
 
-    if not notifier.send_resultado(resultado):
-        _log_fallback("resultado", resultado.to_dict(), log_cfg)
+    if resultado is None:
+        return
 
-    if indicador is not None and not notifier.send_indicador(indicador):
-        _log_fallback("indicador", indicador.to_dict(), log_cfg)
+    if id_procesamiento is None or not notifier.send_resultado(id_procesamiento, resultado):
+        _log_fallback("resultado", resultado.to_dict(), log_cfg)
 
 
 def _log_fallback(kind: str, payload: dict, log_cfg: dict) -> None:
     """
-    Si notifier.py no pudo enviar el dato tras sus reintentos, lo guarda
-    localmente (si fallback_to_local_log está activo) para no perderlo.
-    Cada línea del .jsonl indica el tipo ("resultado" | "indicador"), para
-    poder reenviarlo después al endpoint correcto.
+    Si notifier.py no pudo enviar el dato tras sus reintentos (o si no
+    había id_procesamiento para asociarlo), lo guarda localmente (si
+    fallback_to_local_log está activo) para no perderlo.
     """
     if not log_cfg.get("fallback_to_local_log", True):
         logger.error(f"Falló el envío de {kind} y el fallback local está desactivado: dato perdido")
@@ -225,25 +269,29 @@ def _log_fallback(kind: str, payload: dict, log_cfg: dict) -> None:
 
 def main() -> None:
     load_dotenv()
-    config = load_config()
+
+    env = os.environ.get("VISIAQP_ENV", "dev")
+    config = load_config(env)
 
     logging_cfg = config.get("logging", {})
     logger.remove()
     logger.add(sys.stderr, level=logging_cfg.get("level", "INFO"))
 
+    logger.info(f"Entorno activo: {env}")
+
     notifier_cfg = config["notifier"]
     notifier = Notifier(
         api_base_url=os.environ.get("API_BASE_URL", "http://localhost:8000"),
         endpoints=notifier_cfg["endpoints"],
-        api_token=os.environ.get("API_TOKEN") or None,
         timeout_seconds=notifier_cfg["timeout_seconds"],
         retry_attempts=notifier_cfg["retry_attempts"],
         retry_backoff_seconds=notifier_cfg["retry_backoff_seconds"],
+        api_key=os.environ.get("MOTOR_API_KEY") or None,
     )
 
-    cameras = config.get("cameras", [])
+    cameras = load_cameras(config, notifier)
     if not cameras:
-        logger.warning("No hay cámaras configuradas en config.yaml")
+        logger.warning("No hay cámaras para procesar")
         return
 
     for camera_config in cameras:
