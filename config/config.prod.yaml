@@ -1,0 +1,18 @@
+# visiaqp-ai - Overrides de PRODUCCION
+
+model:
+  device: "cuda:0"
+
+processing:
+  target_fps: 5
+
+videos:
+  library_dir: "/mnt/videos"
+
+logging:
+  level: "WARNING"
+
+visualizer:
+  enabled: false
+
+fallback_to_local_cameras: false
