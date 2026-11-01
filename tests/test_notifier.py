@@ -124,3 +124,18 @@ def test_sync_videos_envia_la_lista_completa(notifier, monkeypatch):
 def test_sync_videos_false_si_falla(notifier, monkeypatch):
     patch_requests(monkeypatch, [FakeResponse(422)])
     assert notifier.sync_videos([]) is False
+
+def test_actividad_se_envia_con_clave_y_conflicto_no_se_reintenta(notifier, monkeypatch):
+    llamadas = patch_requests(monkeypatch, [FakeResponse(409)])
+    assert notifier.send_actividad(5, {'fps_procesamiento': 2}) is False
+    assert len(llamadas) == 1
+    assert llamadas[0][1].endswith('/procesamientos/5/actividad')
+    assert llamadas[0][2]['headers']['X-API-Key'] == 'clave'
+
+
+def test_catalogo_conserva_intervalo_por_camara(notifier, monkeypatch):
+    patch_requests(monkeypatch, [FakeResponse(200, [{
+        'id_camara': 1, 'id_zona': 1, 'url_stream': 'rtsp://ejemplo',
+        'intervalo_muestreo_seg': 15,
+    }])])
+    assert notifier.get_cameras()[0]['intervalo_muestreo_seg'] == 15

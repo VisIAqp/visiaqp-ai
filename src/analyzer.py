@@ -12,7 +12,8 @@ del sistema, para que los resultados no dependan de la velocidad de
 procesamiento.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from uuid import uuid4
 from datetime import datetime, timedelta
 from typing import List
 
@@ -26,17 +27,26 @@ class ResultadoDeteccion:
     id_camara: int | None
     periodo_inicio: str   # ISO datetime (evento)
     periodo_fin: str      # ISO datetime (evento)
-    cantidad_peatones: int       # únicos en la ventana (ver tracker.window_unique_count)
+    cantidad_peatones: int       # IDs distintos observados dentro de la zona en la ventana
     confianza_promedio: float
+
+    promedio_presentes: float | None = None
+    max_presentes: int | None = None
+    segundos_observados: float | None = None
+    clave_ventana: str = field(default_factory=lambda: str(uuid4()))
 
     def to_dict(self) -> dict:
         return {
+            "clave_ventana": self.clave_ventana,
             "id_zona": self.id_zona,
             "id_camara": self.id_camara,
             "periodo_inicio": self.periodo_inicio,
             "periodo_fin": self.periodo_fin,
             "cantidad_peatones": self.cantidad_peatones,
             "confianza_promedio": round(self.confianza_promedio, 2),
+            "promedio_presentes": self.promedio_presentes,
+            "max_presentes": self.max_presentes,
+            "segundos_observados": self.segundos_observados,
         }
 
 
@@ -59,6 +69,7 @@ class ZoneAnalyzer:
         self.window_seconds = window_seconds
 
         self._samples: List[_WindowSample] = []
+        self._ids_en_zona: set[int] = set()
         self._window_start: datetime | None = None
 
     def add_sample(self, tracked_detections_in_zone: list, timestamp: datetime) -> None:
@@ -67,9 +78,12 @@ class ZoneAnalyzer:
         en el instante `timestamp` (hora del evento), junto con su
         confianza promedio.
         """
+        if self._samples and timestamp < self._samples[-1].timestamp:
+            raise ValueError("Las muestras deben llegar en orden temporal")
         if self._window_start is None:
             self._window_start = timestamp
 
+        self._ids_en_zona.update(d.track_id for d in tracked_detections_in_zone)
         count = len(tracked_detections_in_zone)
         avg_conf = (
             sum(d.confidence for d in tracked_detections_in_zone) / count
@@ -91,13 +105,13 @@ class ZoneAnalyzer:
             return False
         return (now - self._window_start) >= timedelta(seconds=self.window_seconds)
 
-    def close_window(self, id_camara: int | None, cantidad_peatones_unicos: int) -> ResultadoDeteccion | None:
+    def close_window(self, id_camara: int | None) -> ResultadoDeteccion | None:
         """
         Cierra la ventana actual, construye el ResultadoDeteccion crudo
         de esa ventana, y reinicia el estado para la siguiente.
 
-        cantidad_peatones_unicos: viene de tracker.window_unique_count(),
-        representa personas ÚNICAS distintas vistas en la ventana.
+        Cuenta únicamente los IDs recibidos tras el filtro espacial.
+        No representa visitantes únicos entre ventanas ni entre cámaras.
         """
         if not self._samples or self._window_start is None:
             logger.warning(f"close_window() llamado sin muestras para zona {self.id_zona}")
@@ -107,13 +121,23 @@ class ZoneAnalyzer:
         periodo_fin = self._samples[-1].timestamp
         avg_conf = sum(s.avg_confidence for s in self._samples) / len(self._samples)
 
+        # Aproximación por escalones: cada lectura rige hasta la siguiente.
+        # Se usa tiempo del evento, no velocidad de inferencia ni número de frames.
+        segundos = (periodo_fin - periodo_inicio).total_seconds()
+        personas_segundo = sum(
+            anterior.count_in_zone * (actual.timestamp - anterior.timestamp).total_seconds()
+            for anterior, actual in zip(self._samples, self._samples[1:])
+        )
         resultado = ResultadoDeteccion(
             id_zona=self.id_zona,
             id_camara=id_camara,
             periodo_inicio=periodo_inicio.isoformat(),
             periodo_fin=periodo_fin.isoformat(),
-            cantidad_peatones=cantidad_peatones_unicos,
+            cantidad_peatones=len(self._ids_en_zona),
             confianza_promedio=avg_conf,
+            promedio_presentes=personas_segundo / segundos if segundos > 0 else None,
+            max_presentes=max(s.count_in_zone for s in self._samples) if segundos > 0 else None,
+            segundos_observados=segundos if segundos > 0 else None,
         )
 
         logger.info(
@@ -124,6 +148,7 @@ class ZoneAnalyzer:
 
         # reset para la siguiente ventana
         self._samples = []
+        self._ids_en_zona.clear()
         self._window_start = None
 
         return resultado

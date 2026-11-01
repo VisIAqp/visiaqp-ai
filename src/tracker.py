@@ -163,11 +163,9 @@ class PedestrianTracker:
 
     def window_unique_count(self) -> int:
         """
-        Cantidad de personas únicas vistas SOLO desde que se cerró la
-        última ventana (analyzer.py). Esto es lo que debe usarse para
-        construir el indicador de concentración de cada ventana — a
-        diferencia de total_unique_count(), este número SÍ se resetea
-        y refleja la concentración real de ese periodo puntual.
+        IDs de toda la imagen vistos desde el último reinicio de ventana.
+        No representa ocupación ni filtra el polígono. El analizador mantiene
+        por separado los IDs que realmente aparecen dentro de la zona.
         """
         return len(self._window_track_ids)
 
@@ -184,6 +182,6 @@ class PedestrianTracker:
         self._seen_track_ids.clear()
         self._window_track_ids.clear()
         # Forzar reset del tracker interno de Ultralytics
-        if hasattr(self.model.predictor, "trackers"):
-            self.model.predictor.trackers = None
+        for seguimiento in getattr(self.model.predictor, "trackers", []) or []:
+            seguimiento.reset()
         logger.info("Tracker reiniciado")

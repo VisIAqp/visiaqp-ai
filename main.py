@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from src.tracker import PedestrianTracker
-from src.video_source import VideoSource
+from src.video_source import VideoSource, CapturaBloqueada
 from src.video_library import VideoLibraryError, resolve_safe, scan
 from src.zones import ZoneManager
 from src.analyzer import ZoneAnalyzer
@@ -60,7 +60,7 @@ def load_config(env: str = "dev", config_dir: str = "config") -> dict:
     return _deep_merge(base, overrides)
 
 
-def load_cameras(config: dict, notifier: Notifier) -> list[dict]:
+def load_cameras(config: dict, notifier: Notifier) -> list[dict] | None:
     """
     Cámaras a procesar: primero el backend (GET /api/camaras); si falla y
     fallback_to_local_cameras está activo, usa cameras_fallback.
@@ -79,7 +79,7 @@ def load_cameras(config: dict, notifier: Notifier) -> list[dict]:
         return local
 
     logger.error("No se pudo obtener la lista de cámaras del backend y no hay fallback local configurado")
-    return []
+    return None
 
 
 # ---------------------------------------------------------------------
@@ -143,133 +143,124 @@ def process_camera(
     config: dict,
     notifier: Notifier,
     id_procesamiento_existente: int | None = None,
-) -> None:
-    """
-    Procesa UNA fuente de principio a fin: detección, tracking, filtro por
-    zona, agregación por ventana, envío de resultados y cierre.
+    stop_event=None,
+) -> str:
+    """Una cámara, una reserva y un estado de tracking independientes."""
+    import threading
 
-    id_procesamiento_existente: si viene (video pendiente ya reclamado), NO se
-    crea un procesamiento nuevo: se usa ese id, con tipo_fuente="video".
-    """
-    id_camara = camera_config["id_camara"]
-    id_zona = camera_config["id_zona"]
-    source = camera_config["source"]
-    nombre = camera_config.get("nombre", f"Camara {id_camara}")
-    alias_archivo = camera_config.get("nombre_archivo")
-    zone_polygon = camera_config.get("zone_polygon")
-    es_video_pendiente = id_procesamiento_existente is not None
-
-    if not zone_polygon:
-        logger.error(f"{nombre}: no tiene zone_polygon definido, se omite")
-        return
-
-    logger.info(f"Iniciando procesamiento: {nombre} (id_camara={id_camara}, zona={id_zona})")
-
-    model_cfg = config["model"]
-    tracker_cfg = config["tracker"]
-    processing_cfg = config["processing"]
-    analysis_cfg = config["analysis"]
-    log_cfg = config.get("logging", {})
-    vis_cfg = config.get("visualizer", {})
-
-    tracker = PedestrianTracker(
-        weights_path=model_cfg["weights_path"],
-        device=model_cfg["device"],
-        confidence_threshold=model_cfg["confidence_threshold"],
-        iou_threshold=model_cfg["iou_threshold"],
-        classes=model_cfg["classes"],
-        algorithm=tracker_cfg["algorithm"],
-        track_thresh=tracker_cfg["track_thresh"],
-        track_buffer=tracker_cfg["track_buffer"],
-        match_thresh=tracker_cfg["match_thresh"],
-    )
-
-    zone_manager = ZoneManager.from_config(camera_config)
-    analyzer = ZoneAnalyzer(id_zona=id_zona, window_seconds=analysis_cfg["window_seconds"])
-
-    visualizer = None
-    if vis_cfg.get("enabled", False):
-        visualizer = Visualizer(
-            window_name=vis_cfg.get("window_name", "VisIAqp - Debug"),
-            show_boxes=vis_cfg.get("show_boxes", True),
-        )
-
-    # Si el procesamiento ya existe, se asigna ANTES del try: así, aunque el
-    # video no se pueda abrir, el bloque finally lo cierra con estado "error".
+    stop_event = stop_event or threading.Event()
+    id_camara = camera_config['id_camara']
+    id_zona = camera_config['id_zona']
+    source = camera_config['source']
+    nombre = camera_config.get('nombre', f'Cámara {id_camara}')
+    log_cfg = config.get('logging', {})
     id_procesamiento = id_procesamiento_existente
-    estado_final = "completado"
-    mensaje_error = None
-
+    tracker = visualizer = analyzer = None
+    estado_final, mensaje_error = 'completado', None
+    reiniciar_proceso = False
+    en_vivo = VideoSource.es_fuente_en_vivo(source)
+    inicio = time.monotonic()
+    frames = 0
+    ultima_actividad = inicio
+    ultima_muestra = None
     try:
-        with VideoSource(
-            source,
-            resize_width=processing_cfg["resize_width"],
-            target_fps=processing_cfg["target_fps"],
-        ) as video:
-            event_start = _resolve_event_start(camera_config, video.is_live, nombre)
-            tipo_fuente = "video" if es_video_pendiente else ("stream" if video.is_live else "video")
-
-            logger.info(f"{nombre}: inicio del evento = {event_start.isoformat()} (tipo_fuente={tipo_fuente})")
-
-            if not es_video_pendiente:
-                procesamiento_payload = {
-                    "id_zona": id_zona,
-                    "id_camara": id_camara,
-                    "tipo_fuente": tipo_fuente,
-                    "ruta_archivo": str(source) if not video.is_live else None,
-                    "fecha_captura_inicio": event_start.isoformat(),
-                }
-                id_procesamiento = notifier.create_procesamiento(procesamiento_payload)
-                if id_procesamiento is None:
-                    logger.error(
-                        f"{nombre}: no se pudo crear el procesamiento en el backend; "
-                        f"se continúa solo con fallback local"
-                    )
-                    _log_fallback("creacion_procesamiento", procesamiento_payload, log_cfg)
-
-            last_event_time = event_start
-
+        if not camera_config.get('zone_polygon'):
+            raise ValueError('La cámara necesita un polígono de análisis')
+        # Reservar antes de cargar YOLO o abrir la transmisión. Si el backend
+        # no confirma la reserva, no se procesa ni se publica nada en paralelo.
+        if id_procesamiento is None:
+            id_procesamiento = notifier.create_procesamiento({
+                'id_zona': id_zona, 'id_camara': id_camara,
+                'tipo_fuente': 'stream' if en_vivo else 'video',
+                'ruta_archivo': None if en_vivo else str(source),
+                'fecha_captura_inicio': _resolve_event_start(camera_config, en_vivo, nombre).isoformat(),
+            })
+            if id_procesamiento is None:
+                logger.warning(f'{nombre}: reserva no confirmada; se omite esta ejecución')
+                return 'reserva_no_confirmada'
+        model_cfg, tracker_cfg = config['model'], config['tracker']
+        processing_cfg = config['processing']
+        if str(model_cfg['device']).startswith('cpu'):
+            import torch
+            torch.set_num_threads(processing_cfg.get('cpu_threads', 2))
+        tracker = PedestrianTracker(
+            weights_path=model_cfg['weights_path'], device=model_cfg['device'],
+            confidence_threshold=model_cfg['confidence_threshold'],
+            iou_threshold=model_cfg['iou_threshold'], classes=model_cfg['classes'],
+            algorithm=tracker_cfg['algorithm'], track_thresh=tracker_cfg['track_thresh'],
+            track_buffer=tracker_cfg['track_buffer'], match_thresh=tracker_cfg['match_thresh'],
+        )
+        zone_manager = ZoneManager.from_config(camera_config)
+        # El intervalo por cámara define la ventana de reporte; target_fps
+        # controla por separado la frecuencia de análisis de imágenes.
+        ventana = camera_config.get('intervalo_muestreo_seg', config['analysis']['window_seconds'])
+        analyzer = ZoneAnalyzer(id_zona=id_zona, window_seconds=ventana)
+        vis_cfg = config.get('visualizer', {})
+        if vis_cfg.get('enabled', False):
+            visualizer = Visualizer(window_name=vis_cfg.get('window_name', 'VisIAqp - Debug'),
+                                    show_boxes=vis_cfg.get('show_boxes', True))
+        if not notifier.send_actividad(id_procesamiento, {}):
+            raise RuntimeError('No se pudo confirmar la vigencia de la reserva')
+        with VideoSource(source, resize_width=processing_cfg['resize_width'],
+                         target_fps=processing_cfg['target_fps'],
+                         read_timeout_seconds=processing_cfg.get('read_timeout_seconds', 10),
+                         stop_event=stop_event) as video:
+            event_start = video.started_at if en_vivo else _resolve_event_start(camera_config, False, nombre)
+            inicio = time.monotonic()
             for frame, elapsed_seconds in video.frames():
+                if stop_event.is_set():
+                    break
                 event_time = event_start + timedelta(seconds=elapsed_seconds)
-                last_event_time = event_time
-
+                # No interpolar ocupación a través de una interrupción prolongada.
+                if en_vivo and ultima_muestra and (event_time - ultima_muestra).total_seconds() > processing_cfg.get('max_gap_seconds', 5):
+                    _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
+                    tracker.reset()
                 tracked = tracker.track(frame)
                 h, w = frame.shape[:2]
                 en_zona = zone_manager.filter_detections_in_zone(tracked, w, h)
-
                 analyzer.add_sample(en_zona, event_time)
-
+                ultima_muestra = event_time
+                frames += 1
+                ahora = time.monotonic()
+                if ahora - ultima_actividad >= config.get('multicamara', {}).get('actividad_seg', 10):
+                    datos = {
+                        'ultima_muestra': event_time.isoformat(),
+                        'fps_procesamiento': frames / max(ahora - inicio, 0.001),
+                        'retraso_seg': max(0, ahora - video.last_captured_monotonic) if en_vivo else 0,
+                    }
+                    if not notifier.send_actividad(id_procesamiento, datos):
+                        raise RuntimeError('Se perdió la comunicación o la reserva; se detiene la fuente')
+                    ultima_actividad = time.monotonic()
                 if visualizer:
                     display = visualizer.draw_zone(frame, zone_manager.zones[0], w, h)
                     display = visualizer.draw_detections(display, en_zona)
                     display = visualizer.draw_info(display, len(en_zona), tracker.total_unique_count())
                     if not visualizer.show(display):
-                        logger.info("Visualizador cerrado por el usuario (tecla 'q')")
+                        stop_event.set()
                         break
-
                 if analyzer.window_elapsed(event_time):
                     _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
-
-            if analyzer.has_pending_samples():
-                logger.info(f"Cerrando ventana final parcial para {nombre}")
-                _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
-
+            if stop_event.is_set():
+                estado_final, mensaje_error = 'error', 'Procesamiento detenido por el supervisor'
     except KeyboardInterrupt:
-        estado_final = "error"
-        mensaje_error = "Procesamiento interrumpido manualmente"
+        estado_final, mensaje_error = 'error', 'Procesamiento interrumpido manualmente'
         raise
-
-    except Exception as e:
-        logger.exception(f"No se pudo procesar {nombre}: {e}")
-        estado_final = "error"
-        mensaje_error = _mensaje_error_publico(e, source, alias_archivo if es_video_pendiente else None)
-
+    except Exception as error:
+        reiniciar_proceso = isinstance(error, CapturaBloqueada)
+        estado_final = 'error'
+        mensaje_error = _mensaje_error_publico(error, source, camera_config.get('nombre_archivo') or 'fuente configurada')
+        logger.error(f'{nombre}: {mensaje_error}')
     finally:
+        if analyzer and tracker and analyzer.has_pending_samples():
+            try:
+                _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
+            except Exception:
+                logger.exception(f'{nombre}: no se pudo cerrar la ventana parcial')
         if visualizer:
             visualizer.close()
-
         if id_procesamiento is not None:
             _close_procesamiento(notifier, id_procesamiento, estado_final, mensaje_error, log_cfg)
+    return 'reiniciar_proceso' if reiniciar_proceso else estado_final
 
 
 def _close_window_and_send(
@@ -281,15 +272,14 @@ def _close_window_and_send(
     log_cfg: dict,
 ) -> None:
     """Cierra la ventana actual y envía el ResultadoDeteccion crudo resultante."""
-    unique_in_window = tracker.window_unique_count()
-    resultado = analyzer.close_window(id_camara, unique_in_window)
+    resultado = analyzer.close_window(id_camara)
     tracker.reset_window()
 
     if resultado is None:
         return
 
     if id_procesamiento is None or not notifier.send_resultado(id_procesamiento, resultado):
-        _log_fallback("resultado", resultado.to_dict(), log_cfg)
+        _log_fallback("resultado", {"id_procesamiento": id_procesamiento, **resultado.to_dict()}, log_cfg)
 
 
 def _log_fallback(kind: str, payload: dict, log_cfg: dict) -> None:
@@ -303,7 +293,7 @@ def _log_fallback(kind: str, payload: dict, log_cfg: dict) -> None:
 
     log_dir = Path(log_cfg.get("log_dir", "data/logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"fallback_{datetime.now().strftime('%Y%m%d')}.jsonl"
+    log_file = log_dir / f"fallback_{datetime.now().strftime('%Y%m%d')}_{os.getpid()}.jsonl"
 
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps({"tipo": kind, "payload": payload}, ensure_ascii=False) + "\n")
@@ -316,18 +306,9 @@ def _log_fallback(kind: str, payload: dict, log_cfg: dict) -> None:
 # ---------------------------------------------------------------------
 
 def run_cameras_mode(config: dict, notifier: Notifier) -> None:
-    cameras = load_cameras(config, notifier)
-    if not cameras:
-        logger.warning("No hay cámaras para procesar")
-        return
+    from src.supervisor import supervisar
+    supervisar(config, notifier, load_cameras)
 
-    for camera_config in cameras:
-        process_camera(camera_config, config, notifier)
-
-
-# ---------------------------------------------------------------------
-# Modo "videos"
-# ---------------------------------------------------------------------
 
 def _sync_catalog(videos_cfg: dict, notifier: Notifier) -> None:
     """
@@ -390,6 +371,7 @@ def _handle_pending_video(pendiente: dict, config: dict, notifier: Notifier) -> 
         "nombre_archivo": nombre_archivo,
         "source": str(ruta),
         "zone_polygon": pendiente["zone_polygon"],
+        "intervalo_muestreo_seg": pendiente.get("intervalo_muestreo_seg", config.get("analysis", {}).get("window_seconds", 60)),
         "event_start": pendiente.get("fecha_captura_inicio"),
     }
     process_camera(camera_config, config, notifier, id_procesamiento_existente=id_proc)

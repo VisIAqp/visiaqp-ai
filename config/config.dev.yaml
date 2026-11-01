@@ -4,7 +4,7 @@ model:
   device: "cpu"
 
 processing:
-  target_fps: 5
+  target_fps: 2
 
 logging:
   level: "DEBUG"

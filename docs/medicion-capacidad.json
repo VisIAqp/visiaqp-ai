@@ -1,0 +1,42 @@
+{
+  "procesadores_logicos": 20,
+  "hilos_por_camara": 2,
+  "ancho": 960,
+  "muestreo_objetivo_fps": 5,
+  "ensayos": [
+    {
+      "camaras_simultaneas": 1,
+      "resultados": [
+        {
+          "camara": 1,
+          "frames": 60,
+          "segundos": 14.436,
+          "fps": 4.156,
+          "cpu_segundos": 50.969,
+          "memoria_mb": 512.4
+        }
+      ]
+    },
+    {
+      "camaras_simultaneas": 2,
+      "resultados": [
+        {
+          "camara": 1,
+          "frames": 60,
+          "segundos": 17.94,
+          "fps": 3.344,
+          "cpu_segundos": 39.531,
+          "memoria_mb": 502.4
+        },
+        {
+          "camara": 2,
+          "frames": 60,
+          "segundos": 17.952,
+          "fps": 3.342,
+          "cpu_segundos": 40.328,
+          "memoria_mb": 501.8
+        }
+      ]
+    }
+  ]
+}
