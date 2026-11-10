@@ -15,6 +15,16 @@ tracker:
 
 processing:
   resize_width: 960
+  cpu_threads: 2
+  read_timeout_seconds: 10
+  max_gap_seconds: 5
+
+multicamara:
+  max_camaras: 2
+  actualizar_seg: 10
+  reintento_seg: 5
+  actividad_seg: 10
+  cierre_seg: 20
 
 analysis:
   window_seconds: 60
@@ -35,6 +45,7 @@ notifier:
     sincronizar_videos: "/api/videos/sincronizar"
     listar_pendientes: "/api/procesamientos/pendientes"
     iniciar_procesamiento: "/api/procesamientos/{id}/iniciar"
+    actividad: "/api/procesamientos/{id}/actividad"
   timeout_seconds: 5
   retry_attempts: 3
   retry_backoff_seconds: 2

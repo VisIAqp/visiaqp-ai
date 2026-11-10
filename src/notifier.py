@@ -103,6 +103,7 @@ class Notifier:
                 "nombre": cam.get("nombre", f"Camara {cam['id_camara']}"),
                 "source": cam["url_stream"],
                 "zone_polygon": cam.get("zone_polygon"),
+                "intervalo_muestreo_seg": cam.get("intervalo_muestreo_seg", 60),
             }
             for cam in data
         ]
@@ -164,3 +165,7 @@ class Notifier:
         if result.status == 409:
             return "conflict"
         return "error"
+
+    def send_actividad(self, id_procesamiento: int, datos: dict) -> bool:
+        endpoint = self.endpoints.get("actividad", "/api/procesamientos/{id}/actividad")
+        return self._request("PATCH", endpoint.format(id=id_procesamiento), datos).ok
