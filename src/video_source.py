@@ -1,12 +1,16 @@
 """Fuentes de archivo y captura en vivo con un único frame pendiente."""
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 import cv2
 import numpy as np
 from loguru import logger
+
+
+def ahora_lima() -> datetime:
+    return datetime.now(timezone(timedelta(hours=-5))).replace(tzinfo=None)
 
 
 class ErrorTransmision(RuntimeError):
@@ -40,7 +44,7 @@ class VideoSource:
         self._lector = None
         self._bloqueada = False
         # Hora de recepción local. No se conoce la hora del sensor remoto.
-        self.started_at = datetime.now()
+        self.started_at = ahora_lima()
         self.start_monotonic = time.monotonic()
         self.last_captured_monotonic = self.start_monotonic
         if self.is_live and not isinstance(source, int):

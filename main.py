@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from src.tracker import PedestrianTracker
-from src.video_source import VideoSource, CapturaBloqueada
+from src.video_source import VideoSource, CapturaBloqueada, ahora_lima
 from src.video_library import VideoLibraryError, resolve_safe, scan
 from src.zones import ZoneManager
 from src.analyzer import ZoneAnalyzer
@@ -95,7 +95,7 @@ def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> dat
       - archivo sin `event_start`: se asume ahora (con advertencia).
     """
     if is_live:
-        return datetime.now()
+        return ahora_lima()
 
     raw = camera_config.get("event_start")
     if raw is None:
@@ -103,7 +103,7 @@ def _resolve_event_start(camera_config: dict, is_live: bool, nombre: str) -> dat
             f"{nombre}: archivo de video sin 'event_start'; "
             f"se asume que el evento ocurre ahora. Defínelo para registrar la fecha real."
         )
-        return datetime.now()
+        return ahora_lima()
 
     if isinstance(raw, datetime):
         return raw
@@ -127,7 +127,7 @@ def _close_procesamiento(
     """Cierra el procesamiento en el backend; si falla, deja rastro en el fallback local."""
     cerrado = notifier.close_procesamiento(id_procesamiento, {
         "estado": estado,
-        "fecha_fin_proceso": datetime.now().isoformat(),
+        "fecha_fin_proceso": ahora_lima().isoformat(),
         "mensaje_error": mensaje_error,
     })
     if not cerrado:
@@ -163,6 +163,7 @@ def process_camera(
     frames = 0
     ultima_actividad = inicio
     ultima_muestra = None
+    fin_bloque = None
     try:
         if not camera_config.get('zone_polygon'):
             raise ValueError('La cámara necesita un polígono de análisis')
@@ -174,6 +175,8 @@ def process_camera(
                 'tipo_fuente': 'stream' if en_vivo else 'video',
                 'ruta_archivo': None if en_vivo else str(source),
                 'fecha_captura_inicio': _resolve_event_start(camera_config, en_vivo, nombre).isoformat(),
+                **({'firma_captura': camera_config['firma_captura']}
+                   if en_vivo and camera_config.get('firma_captura') else {}),
             })
             if id_procesamiento is None:
                 logger.warning(f'{nombre}: reserva no confirmada; se omite esta ejecución')
@@ -215,6 +218,11 @@ def process_camera(
                 if en_vivo and ultima_muestra and (event_time - ultima_muestra).total_seconds() > processing_cfg.get('max_gap_seconds', 5):
                     _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
                     tracker.reset()
+                if en_vivo and (fin_bloque is None or event_time >= fin_bloque):
+                    if analyzer.has_pending_samples():
+                        _close_window_and_send(analyzer, tracker, id_camara, id_procesamiento, notifier, log_cfg)
+                    inicio_bloque = event_time.replace(minute=event_time.minute // 5 * 5, second=0, microsecond=0)
+                    fin_bloque = inicio_bloque + timedelta(minutes=5)
                 tracked = tracker.track(frame)
                 h, w = frame.shape[:2]
                 en_zona = zone_manager.filter_detections_in_zone(tracked, w, h)

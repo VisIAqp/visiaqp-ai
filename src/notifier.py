@@ -104,6 +104,7 @@ class Notifier:
                 "source": cam["url_stream"],
                 "zone_polygon": cam.get("zone_polygon"),
                 "intervalo_muestreo_seg": cam.get("intervalo_muestreo_seg", 60),
+                **({"firma_captura": cam["firma_captura"]} if cam.get("firma_captura") else {}),
             }
             for cam in data
         ]
